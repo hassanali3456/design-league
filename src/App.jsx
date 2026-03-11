@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { initializeApp } from "firebase/app";
 import { getDatabase, ref, onValue, set, get } from "firebase/database";
 
-// ─── PASTE YOUR FIREBASE CONFIG HERE ───────────────────────────────────────
+// ─── FIREBASE CONFIG ────────────────────────────────────────────────────────
 const firebaseConfig = {
   apiKey: "AIzaSyAinqIr5AAedlMX7lOGq2SgBh94HDDxNsE",
   authDomain: "design-league-9be60.firebaseapp.com",
@@ -12,7 +12,11 @@ const firebaseConfig = {
   messagingSenderId: "994579850885",
   appId: "1:994579850885:web:fbf488697d00a2f7b02bec"
 };
-// ───────────────────────────────────────────────────────────────────────────
+
+// ─── CLOUDINARY CONFIG ───────────────────────────────────────────────────────
+const CLOUDINARY_CLOUD = "dqa3mblpo";
+const CLOUDINARY_PRESET = "na7fjscx";
+// ─────────────────────────────────────────────────────────────────────────────
 
 const app = initializeApp(firebaseConfig);
 const db  = getDatabase(app);
@@ -40,18 +44,21 @@ function fmtMs(ms) {
   return `${String(m).padStart(2,"0")}:${String(s % 60).padStart(2,"0")}.${String(centis).padStart(2,"0")}`;
 }
 
-// ── Firebase helpers ────────────────────────────────────────────────────────
 function dbRef(cat) { return ref(db, `races/${cat}`); }
-
 async function readCat(cat) {
   const snap = await get(dbRef(cat));
   return snap.exists() ? snap.val() : { active: null, history: [] };
 }
+async function writeCat(cat, data) { await set(dbRef(cat), data); }
 
-async function writeCat(cat, data) {
-  await set(dbRef(cat), data);
+async function uploadToCloudinary(file) {
+  const fd = new FormData();
+  fd.append("file", file);
+  fd.append("upload_preset", CLOUDINARY_PRESET);
+  const res  = await fetch(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD}/image/upload`, { method: "POST", body: fd });
+  const data = await res.json();
+  return data.secure_url;
 }
-// ───────────────────────────────────────────────────────────────────────────
 
 export default function App() {
   const [starter, setStarter] = useState(null);
@@ -63,49 +70,33 @@ export default function App() {
   const [pwErr,       setPwErr]       = useState(false);
   const [now,         setNow]         = useState(Date.now());
   const [nameInput,   setNameInput]   = useState("");
+  const [imageFile,   setImageFile]   = useState(null);
+  const [imagePreview,setImagePreview]= useState(null);
   const [submitMsg,   setSubmitMsg]   = useState("");
   const [adminCat,    setAdminCat]    = useState("starter");
   const [raceLabel,   setRaceLabel]   = useState("");
   const [busy,        setBusy]        = useState(false);
   const [loading,     setLoading]     = useState(true);
+  const [lightbox,    setLightbox]    = useState(null);
 
-  // Live timer tick
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 50);
     return () => clearInterval(id);
   }, []);
 
-  // Subscribe to Firebase in real-time
   useEffect(() => {
-    const unsubStarter = onValue(dbRef("starter"), snap => {
-      setStarter(snap.exists() ? snap.val() : { active: null, history: [] });
-      setLoading(false);
-    });
-    const unsubPro = onValue(dbRef("pro"), snap => {
-      setPro(snap.exists() ? snap.val() : { active: null, history: [] });
-    });
-    return () => { unsubStarter(); unsubPro(); };
+    const u1 = onValue(dbRef("starter"), snap => { setStarter(snap.exists() ? snap.val() : { active: null, history: [] }); setLoading(false); });
+    const u2 = onValue(dbRef("pro"),     snap => { setPro(snap.exists()     ? snap.val() : { active: null, history: [] }); });
+    return () => { u1(); u2(); };
   }, []);
 
-  function setCatData(cat, data) {
-    if (cat === "starter") setStarter(data);
-    else setPro(data);
-  }
-
-  function getCatData(cat) {
-    return cat === "starter" ? starter : pro;
-  }
-
-  // ── Actions ──────────────────────────────────────────────────────────────
+  function getCatData(cat) { return cat === "starter" ? starter : pro; }
 
   async function startRace(cat) {
     if (!raceLabel.trim() || busy) return;
     setBusy(true);
     const current = await readCat(cat);
-    await writeCat(cat, {
-      ...current,
-      active: { id: Date.now().toString(), label: raceLabel.trim(), startedAt: Date.now(), entries: [] },
-    });
+    await writeCat(cat, { ...current, active: { id: Date.now().toString(), label: raceLabel.trim(), startedAt: Date.now(), entries: [] } });
     setRaceLabel("");
     setBusy(false);
   }
@@ -115,26 +106,25 @@ export default function App() {
     setBusy(true);
     const current = await readCat(cat);
     if (!current.active) { setBusy(false); return; }
-    await writeCat(cat, {
-      active: null,
-      history: [current.active, ...(current.history || [])],
-    });
+    await writeCat(cat, { active: null, history: [current.active, ...(current.history || [])] });
     setBusy(false);
   }
 
   async function handleSubmit(cat) {
-    const catData = getCatData(cat);
-    if (!catData?.active || !nameInput.trim() || busy) return;
+    if (!nameInput.trim() || busy) return;
     setBusy(true);
+    setSubmitMsg("Uploading...");
 
-    // Re-read from DB to avoid race conditions
     const current = await readCat(cat);
-    if (!current.active) { setBusy(false); setSubmitMsg("Race has ended."); setTimeout(() => setSubmitMsg(""), 3000); return; }
+    if (!current.active) {
+      setBusy(false);
+      setSubmitMsg("Race has ended.");
+      setTimeout(() => setSubmitMsg(""), 3000);
+      return;
+    }
 
     const elapsed  = Date.now() - current.active.startedAt;
-    const existing = (current.active.entries || []).find(
-      e => e.name.toLowerCase() === nameInput.trim().toLowerCase()
-    );
+    const existing = (current.active.entries || []).find(e => e.name.toLowerCase() === nameInput.trim().toLowerCase());
     if (existing) {
       setBusy(false);
       setSubmitMsg("You already submitted!");
@@ -142,12 +132,25 @@ export default function App() {
       return;
     }
 
-    const entry  = { id: Date.now().toString(), name: nameInput.trim(), elapsed };
+    let imageUrl = null;
+    if (imageFile) {
+      try {
+        imageUrl = await uploadToCloudinary(imageFile);
+      } catch {
+        setSubmitMsg("Image upload failed, try again.");
+        setBusy(false);
+        return;
+      }
+    }
+
+    const entry  = { id: Date.now().toString(), name: nameInput.trim(), elapsed, imageUrl };
     const sorted = [...(current.active.entries || []), entry].sort((a, b) => a.elapsed - b.elapsed);
     await writeCat(cat, { ...current, active: { ...current.active, entries: sorted } });
 
     setNameInput("");
-    setSubmitMsg(`✓ Recorded! Your time: ${fmtMs(elapsed)}`);
+    setImageFile(null);
+    setImagePreview(null);
+    setSubmitMsg(`✓ Submitted! Your time: ${fmtMs(elapsed)}`);
     setTimeout(() => setSubmitMsg(""), 4000);
     setBusy(false);
   }
@@ -156,10 +159,7 @@ export default function App() {
     if (busy) return;
     setBusy(true);
     const current = await readCat(cat);
-    await writeCat(cat, {
-      ...current,
-      active: { ...current.active, entries: (current.active.entries || []).filter(e => e.id !== id) },
-    });
+    await writeCat(cat, { ...current, active: { ...current.active, entries: (current.active.entries || []).filter(e => e.id !== id) } });
     setBusy(false);
   }
 
@@ -176,7 +176,12 @@ export default function App() {
     else setPwErr(true);
   }
 
-  // ── Render ────────────────────────────────────────────────────────────────
+  function handleFileChange(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    setImageFile(file);
+    setImagePreview(URL.createObjectURL(file));
+  }
 
   if (loading) return (
     <div style={{ display:"flex", alignItems:"center", justifyContent:"center", minHeight:"100vh", background:"#080808" }}>
@@ -193,6 +198,14 @@ export default function App() {
   return (
     <div style={s.root}>
       <div style={s.bgGlow} />
+
+      {/* Lightbox */}
+      {lightbox && (
+        <div style={s.lightboxOverlay} onClick={() => setLightbox(null)}>
+          <img src={lightbox} alt="submission" style={s.lightboxImg} onClick={e => e.stopPropagation()} />
+          <div style={s.lightboxClose} onClick={() => setLightbox(null)}>✕</div>
+        </div>
+      )}
 
       {/* HEADER */}
       <header style={s.header}>
@@ -247,17 +260,37 @@ export default function App() {
 
             {active && (
               <div style={s.submitCard}>
-                <div style={{ fontSize:12, color:"#666", letterSpacing:0.5, marginBottom:10 }}>
-                  Done with your model? Enter your name to record your finish time.
+                <div style={{ fontSize:12, color:"#666", letterSpacing:0.5, marginBottom:12 }}>
+                  Done with your model? Enter your name and upload a screenshot.
                 </div>
-                <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
+                <div style={{ display:"flex", gap:10, flexWrap:"wrap", marginBottom:10 }}>
                   <input style={s.input} placeholder="Your full name" value={nameInput}
                     onChange={e => setNameInput(e.target.value)}
                     onKeyDown={e => e.key === "Enter" && handleSubmit(tab)} />
-                  <button style={{ ...s.btnGold, opacity: busy ? 0.5 : 1 }} onClick={() => handleSubmit(tab)} disabled={busy}>
-                    {busy ? "..." : "Submit Time"}
-                  </button>
                 </div>
+
+                {/* Image upload */}
+                <div style={s.uploadRow}>
+                  <label style={s.uploadLabel}>
+                    {imagePreview
+                      ? <img src={imagePreview} alt="preview" style={s.uploadPreview} />
+                      : <div style={s.uploadPlaceholder}>
+                          <div style={{ fontSize:22, marginBottom:4 }}>📷</div>
+                          <div style={{ fontSize:12, color:"#555" }}>Click to upload screenshot</div>
+                          <div style={{ fontSize:10, color:"#333", marginTop:2 }}>Optional</div>
+                        </div>
+                    }
+                    <input type="file" accept="image/*" style={{ display:"none" }} onChange={handleFileChange} />
+                  </label>
+                  {imagePreview && (
+                    <button style={s.btnXS} onClick={() => { setImageFile(null); setImagePreview(null); }}>Remove</button>
+                  )}
+                </div>
+
+                <button style={{ ...s.btnGold, marginTop:12, opacity: busy ? 0.5 : 1 }}
+                  onClick={() => handleSubmit(tab)} disabled={busy}>
+                  {busy ? "Submitting..." : "Submit Time"}
+                </button>
                 {submitMsg && <div style={{ marginTop:10, fontSize:13, color:"#FFD700" }}>{submitMsg}</div>}
               </div>
             )}
@@ -270,7 +303,7 @@ export default function App() {
                 </div>
                 {entries.length === 0
                   ? <div style={s.empty}>No submissions yet — be the first to finish!</div>
-                  : <Board entries={entries} />}
+                  : <Board entries={entries} onImage={setLightbox} />}
               </div>
             )}
 
@@ -285,7 +318,7 @@ export default function App() {
                       <span style={{ fontFamily:"'Syne',sans-serif", fontWeight:700, fontSize:14, color:"#888" }}>{h.label}</span>
                       <span style={s.badge}>{h.entries?.length || 0} finishers</span>
                     </div>
-                    {h.entries?.length > 0 && <Board entries={h.entries} compact />}
+                    {h.entries?.length > 0 && <Board entries={h.entries} compact onImage={setLightbox} />}
                   </div>
                 ))}
               </div>
@@ -328,7 +361,6 @@ export default function App() {
               ))}
             </div>
 
-            {/* Race control */}
             <div style={{ ...s.adminCard, marginTop:20 }}>
               <div style={s.adminCardTitle}>Race Control · {adminCat.toUpperCase()}</div>
 
@@ -352,6 +384,10 @@ export default function App() {
                           <span style={{ color:RANK_STYLE[i]?.color||"#555", fontFamily:"'Bebas Neue',sans-serif", fontSize:13, minWidth:28 }}>
                             {RANK_STYLE[i]?.medal || `#${i+1}`}
                           </span>
+                          {e.imageUrl && (
+                            <img src={e.imageUrl} alt="" style={{ width:32, height:32, borderRadius:4, objectFit:"cover", cursor:"pointer" }}
+                              onClick={() => setLightbox(e.imageUrl)} />
+                          )}
                           <span style={{ flex:1, fontSize:14, color:"#ccc" }}>{e.name}</span>
                           <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:13, color:"#666" }}>{fmtMs(e.elapsed)}</span>
                           <button style={s.btnXS} onClick={() => removeEntry(adminCat, e.id)} disabled={busy}>✕</button>
@@ -376,7 +412,6 @@ export default function App() {
               )}
             </div>
 
-            {/* History */}
             {getCatData(adminCat)?.history?.length > 0 && (
               <div style={s.adminCard}>
                 <div style={s.adminCardTitle}>Race History</div>
@@ -410,7 +445,7 @@ export default function App() {
   );
 }
 
-function Board({ entries, compact }) {
+function Board({ entries, compact, onImage }) {
   return (
     <div style={{ display:"flex", flexDirection:"column", gap: compact ? 6 : 10 }}>
       {entries.map((e, i) => {
@@ -428,6 +463,17 @@ function Board({ entries, compact }) {
             <div style={{ fontFamily:"'Bebas Neue',sans-serif", fontSize: compact ? 15 : 20, color: rs ? rs.color : "#333", minWidth:30, textAlign:"center" }}>
               {rs ? rs.medal : `#${i+1}`}
             </div>
+
+            {/* Thumbnail */}
+            {e.imageUrl ? (
+              <img src={e.imageUrl} alt="" style={{ width: compact ? 32 : 44, height: compact ? 32 : 44, borderRadius:6, objectFit:"cover", cursor:"pointer", border:"1px solid #2a2a2a", flexShrink:0 }}
+                onClick={() => onImage(e.imageUrl)} />
+            ) : (
+              <div style={{ width: compact ? 32 : 44, height: compact ? 32 : 44, borderRadius:6, background:"#141414", border:"1px solid #1e1e1e", flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center" }}>
+                <span style={{ fontSize:14, opacity:0.3 }}>📷</span>
+              </div>
+            )}
+
             <div style={{ flex:1, fontFamily:"'Syne',sans-serif", fontWeight:700, fontSize: compact ? 13 : 15, color: rs ? "#fff" : "#555" }}>
               {e.name}
             </div>
@@ -473,4 +519,11 @@ const s = {
   adminCardTitle:{ fontFamily:"'Bebas Neue',sans-serif", fontSize:15, letterSpacing:2, color:"#444", marginBottom:16 },
   smallLabel:   { fontSize:10, color:"#3a3a3a", letterSpacing:1.5, textTransform:"uppercase", marginBottom:8 },
   empty:        { color:"#2e2e2e", fontSize:13, padding:"20px 0", textAlign:"center" },
+  uploadRow:    { display:"flex", alignItems:"center", gap:12 },
+  uploadLabel:  { cursor:"pointer", display:"block" },
+  uploadPreview:{ width:120, height:80, objectFit:"cover", borderRadius:8, border:"1px solid #2a2a2a", display:"block" },
+  uploadPlaceholder: { width:120, height:80, background:"#111", border:"2px dashed #222", borderRadius:8, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center" },
+  lightboxOverlay: { position:"fixed", inset:0, background:"rgba(0,0,0,0.92)", zIndex:999, display:"flex", alignItems:"center", justifyContent:"center" },
+  lightboxImg:  { maxWidth:"90vw", maxHeight:"85vh", borderRadius:10, objectFit:"contain" },
+  lightboxClose:{ position:"absolute", top:20, right:24, fontSize:24, color:"#aaa", cursor:"pointer" },
 };
